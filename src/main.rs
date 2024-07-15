@@ -1,16 +1,14 @@
+mod configure;
+
 use {
-    anyhow::{anyhow, Result},
-    clap::{crate_description, crate_name, crate_version, Args, Parser},
-    quinn::{ClientConfig, Endpoint, Incoming, ServerConfig},
-    rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer},
-    std::{
-        io,
-        net::{SocketAddr, ToSocketAddrs},
-        sync::Arc,
-    },
+    anyhow::Result,
+    clap::{crate_description, crate_name, crate_version, Parser},
+    quinn::{Endpoint, Incoming, ServerConfig},
+    std::net::SocketAddr,
     tokio::{
+        io::AsyncReadExt,
         sync::mpsc::{self, unbounded_channel, UnboundedReceiver, UnboundedSender},
-        time::{self, Duration, Instant},
+        time::{self, Duration},
     },
 };
 
@@ -31,11 +29,14 @@ async fn produce_tokens(
     Ok(())
 }
 
-async fn transfer(
-    mut from: quinn::RecvStream,
+async fn transfer<RecvType>(
+    mut from: RecvType,
     mut tokens: mpsc::Receiver<usize>,
     sender: Sender,
-) -> Result<()> {
+) -> Result<()>
+where
+    RecvType: AsyncReadExt + Unpin,
+{
     // TODO try using Bytes: BytesMut::with_capacity(4096);
     const BUF_SIZE: usize = 4 * 1024;
     let mut data = vec![0u8; BUF_SIZE];
@@ -45,20 +46,16 @@ async fn transfer(
         };
 
         while bytes_available > 0 {
-            match from
+            let n_read = from
                 .read(&mut data[..bytes_available.min(BUF_SIZE)])
-                .await?
-            {
-                Some(n_read) => {
-                    eprintln!("Read chunk: {:?}", &data[..n_read]);
-                    sender.send(data[..n_read].to_vec())?;
-                    bytes_available -= n_read;
-                }
-                None => {
-                    eprintln!("Stream finished.");
-                    break;
-                }
+                .await?;
+            if n_read == 0 {
+                eprintln!("Stream finished.");
+                break;
             }
+            eprintln!("Read chunk: {:?}", &data[..n_read]);
+            sender.send(data[..n_read].to_vec())?;
+            bytes_available -= n_read;
         }
     }
     Ok(())
@@ -93,24 +90,7 @@ async fn proxy(incoming: Incoming, sender: Sender) -> Result<()> {
     }
 }
 
-/// Returns default server configuration along with its certificate.
-fn configure_server() -> Result<(ServerConfig, CertificateDer<'static>)> {
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let cert_der = CertificateDer::from(cert.cert);
-    let priv_key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
-
-    let mut server_config =
-        ServerConfig::with_single_cert(vec![cert_der.clone()], priv_key.into())?;
-    let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
-    transport_config.max_concurrent_uni_streams(0_u8.into());
-
-    Ok((server_config, cert_der))
-}
-
-async fn listen(listen: SocketAddr, sender: Sender) -> Result<()> {
-    let Ok((server_config, _)) = configure_server() else {
-        return Err(anyhow!("This is a custom error message"));
-    };
+async fn listen(server_config: ServerConfig, listen: SocketAddr, sender: Sender) -> Result<()> {
     let endpoint = Endpoint::server(server_config, listen)?;
     eprintln!("listening on {}", endpoint.local_addr()?);
 
@@ -143,8 +123,108 @@ struct Cli {
 async fn main() -> Result<()> {
     let args = Cli::parse();
 
+    let (server_config, _) = configure::configure_server();
     let (sender, receiver) = unbounded_channel();
 
-    tokio::try_join!(listen(args.listen_address, sender), consume_data(receiver))?;
+    tokio::try_join!(
+        listen(server_config, args.listen_address, sender),
+        consume_data(receiver)
+    )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        configure::{configure_client, configure_server},
+        quinn::Endpoint,
+        std::net::{Ipv4Addr, SocketAddr},
+        tokio::{
+            io::AsyncWriteExt,
+            sync::mpsc,
+            time::{timeout, Duration},
+        },
+    };
+
+    #[tokio::test]
+    async fn test_produce_tokens() {
+        let (sender, mut receiver) = mpsc::channel(10);
+        let bytes_per_token = 1024;
+        let token_interval = Duration::from_millis(10);
+
+        tokio::spawn(async move {
+            produce_tokens(bytes_per_token, token_interval, sender)
+                .await
+                .unwrap();
+        });
+
+        for _ in 0..5 {
+            let token = receiver.recv().await;
+            assert_eq!(token, Some(bytes_per_token));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_transfer() {
+        let (mut send_stream, recv_stream) = tokio::io::duplex(64);
+        let (token_sender, token_receiver) = mpsc::channel(10);
+        let (unbounded_sender, mut unbounded_receiver) = mpsc::unbounded_channel();
+
+        let data = b"hello world";
+        send_stream.write_all(data).await.unwrap();
+
+        tokio::spawn(async move {
+            transfer(recv_stream, token_receiver, unbounded_sender)
+                .await
+                .unwrap();
+        });
+
+        token_sender.send(1024).await.unwrap();
+
+        let received_data = unbounded_receiver.recv().await.unwrap();
+        assert_eq!(received_data, data);
+    }
+
+    #[tokio::test]
+    async fn test_listen() -> Result<()> {
+        let listen_addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+
+        let (server_config, server_cert) = configure_server();
+        tokio::spawn(async move {
+            listen(server_config, listen_addr, sender).await.unwrap();
+        });
+
+        // Wait for the server to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Configure client
+        let client_config = configure_client(server_cert);
+
+        let bind = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), 0);
+        let mut endpoint = Endpoint::client(bind)?;
+        endpoint.set_default_client_config(client_config);
+
+        // Connect to the server
+        let connection = endpoint
+            .connect(listen_addr, "localhost")
+            .expect("failed to create connecting")
+            .await
+            .expect("failed to connect");
+
+        // Open a unidirectional stream and send data
+        let mut send_stream = connection.open_uni().await.unwrap();
+        let data = b"hello world";
+        send_stream.write_all(data).await.unwrap();
+        send_stream.finish().unwrap();
+
+        // Ensure the server received the data
+        let received_data = timeout(Duration::from_secs(1), receiver.recv())
+            .await?
+            .expect("Data should be received");
+        assert_eq!(received_data, data);
+
+        Ok(())
+    }
 }
