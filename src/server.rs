@@ -1,21 +1,21 @@
 use {
     anyhow::Result,
-    quinn::{Endpoint, Incoming, ServerConfig},
-    std::net::SocketAddr,
+    quinn::{Endpoint, Incoming},
     tokio::{
         io::AsyncReadExt,
         sync::mpsc::{self, UnboundedSender},
         time::{self, Duration},
     },
+    tracing::{debug, info},
 };
 
 type Sender = UnboundedSender<Vec<u8>>;
 
 #[derive(Debug, Clone, Copy)]
 pub struct TokenBucketConfig {
-    bucket_capacity: usize,
-    bytes_per_token: usize,
-    token_interval: Duration,
+    pub bucket_capacity: usize,
+    pub bytes_per_token: usize,
+    pub token_interval: Duration,
 }
 
 impl Default for TokenBucketConfig {
@@ -64,10 +64,10 @@ where
                 .read(&mut data[..bytes_available.min(BUF_SIZE)])
                 .await?;
             if n_read == 0 {
-                eprintln!("Stream finished.");
+                debug!("Stream finished.");
                 break;
             }
-            eprintln!("Read chunk: {:?}", &data[..n_read]);
+            debug!("Read chunk: {:?}", &data[..n_read]);
             sender.send(data[..n_read].to_vec())?;
             bytes_available -= n_read;
         }
@@ -86,7 +86,7 @@ async fn proxy(incoming: Incoming, sender: Sender, config: TokenBucketConfig) ->
         let stream = connection.accept_uni().await;
         let stream = match stream {
             Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
-                eprintln!("connection closed");
+                info!("connection closed");
                 return Ok(());
             }
             Err(e) => {
@@ -104,17 +104,11 @@ async fn proxy(incoming: Incoming, sender: Sender, config: TokenBucketConfig) ->
     }
 }
 
-pub async fn listen(
-    server_config: ServerConfig,
-    listen: SocketAddr,
-    sender: Sender,
-    config: TokenBucketConfig,
-) -> Result<()> {
-    let endpoint = Endpoint::server(server_config, listen)?;
-    eprintln!("listening on {}", endpoint.local_addr()?);
+pub async fn listen(endpoint: Endpoint, sender: Sender, config: TokenBucketConfig) -> Result<()> {
+    info!("listening on {}", endpoint.local_addr()?);
 
     while let Some(incoming) = endpoint.accept().await {
-        eprintln!("accepting connection");
+        info!("accepting connection");
         tokio::spawn(proxy(incoming, sender.clone(), config));
     }
     Ok(())
@@ -175,19 +169,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_listen() -> Result<()> {
-        let listen_addr: SocketAddr = "127.0.0.1:5000".parse().unwrap();
         let (sender, mut receiver) = mpsc::unbounded_channel();
 
         let (server_config, server_cert) = configure_server();
+        let server_endpoint = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap())?;
+        let listen_addr = server_endpoint.local_addr().unwrap();
         tokio::spawn(async move {
-            listen(
-                server_config,
-                listen_addr,
-                sender,
-                TokenBucketConfig::default(),
-            )
-            .await
-            .unwrap();
+            listen(server_endpoint, sender, TokenBucketConfig::default())
+                .await
+                .unwrap();
         });
 
         // Wait for the server to start

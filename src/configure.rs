@@ -4,7 +4,6 @@ use {
 };
 
 /// Builds client configuration. Trusts given node certificate.
-#[cfg(test)]
 pub fn configure_client(node_cert: CertificateDer<'static>) -> quinn::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(node_cert).unwrap();
