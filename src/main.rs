@@ -14,6 +14,23 @@ use {
 
 type Sender = UnboundedSender<Vec<u8>>;
 
+#[derive(Debug, Clone, Copy)]
+struct TokenBucketConfig {
+    bucket_capacity: usize,
+    bytes_per_token: usize,
+    token_interval: Duration,
+}
+
+impl Default for TokenBucketConfig {
+    fn default() -> Self {
+        TokenBucketConfig {
+            bucket_capacity: 100,
+            bytes_per_token: 1500,
+            token_interval: Duration::from_millis(100),
+        }
+    }
+}
+
 async fn produce_tokens(
     bytes_per_token: usize,
     token_interval: Duration,
@@ -61,13 +78,13 @@ where
     Ok(())
 }
 
-async fn proxy(incoming: Incoming, sender: Sender) -> Result<()> {
-    const NUMBER_OF_TOKENS: usize = 100;
-    const BYTES_PER_TOKEN: usize = 20 * 1024;
-    const TOKEN_INTERVAL: Duration = Duration::from_millis(100);
-
+async fn proxy(incoming: Incoming, sender: Sender, config: TokenBucketConfig) -> Result<()> {
+    let TokenBucketConfig {
+        bucket_capacity,
+        bytes_per_token,
+        token_interval,
+    } = config;
     let connection = incoming.await?;
-
     loop {
         let stream = connection.accept_uni().await;
         let stream = match stream {
@@ -81,22 +98,27 @@ async fn proxy(incoming: Incoming, sender: Sender) -> Result<()> {
             Ok(s) => s,
         };
 
-        let (listener_token_sender, listener_token_receiver) = mpsc::channel(NUMBER_OF_TOKENS);
+        let (listener_token_sender, listener_token_receiver) = mpsc::channel(bucket_capacity);
 
         tokio::try_join!(
-            produce_tokens(BYTES_PER_TOKEN, TOKEN_INTERVAL, listener_token_sender),
+            produce_tokens(bytes_per_token, token_interval, listener_token_sender),
             transfer(stream, listener_token_receiver, sender.clone()),
         )?;
     }
 }
 
-async fn listen(server_config: ServerConfig, listen: SocketAddr, sender: Sender) -> Result<()> {
+async fn listen(
+    server_config: ServerConfig,
+    listen: SocketAddr,
+    sender: Sender,
+    config: TokenBucketConfig,
+) -> Result<()> {
     let endpoint = Endpoint::server(server_config, listen)?;
     eprintln!("listening on {}", endpoint.local_addr()?);
 
     while let Some(incoming) = endpoint.accept().await {
         eprintln!("accepting connection");
-        tokio::spawn(proxy(incoming, sender.clone()));
+        tokio::spawn(proxy(incoming, sender.clone(), config));
     }
     Ok(())
 }
@@ -127,7 +149,12 @@ async fn main() -> Result<()> {
     let (sender, receiver) = unbounded_channel();
 
     tokio::try_join!(
-        listen(server_config, args.listen_address, sender),
+        listen(
+            server_config,
+            args.listen_address,
+            sender,
+            TokenBucketConfig::default()
+        ),
         consume_data(receiver)
     )?;
     Ok(())
@@ -193,7 +220,14 @@ mod tests {
 
         let (server_config, server_cert) = configure_server();
         tokio::spawn(async move {
-            listen(server_config, listen_addr, sender).await.unwrap();
+            listen(
+                server_config,
+                listen_addr,
+                sender,
+                TokenBucketConfig::default(),
+            )
+            .await
+            .unwrap();
         });
 
         // Wait for the server to start
