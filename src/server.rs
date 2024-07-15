@@ -6,7 +6,8 @@ use {
         sync::mpsc::{self, UnboundedSender},
         time::{self, Duration},
     },
-    tracing::{debug, info},
+    tokio_util::sync::CancellationToken,
+    tracing::{debug, error, info},
 };
 
 type Sender = UnboundedSender<Vec<u8>>;
@@ -54,7 +55,9 @@ where
     // TODO try using Bytes: BytesMut::with_capacity(4096);
     const BUF_SIZE: usize = 4 * 1024;
     let mut data = vec![0u8; BUF_SIZE];
-    loop {
+    'outer: loop {
+        // TODO not sure that this is correct way of doing things
+        // because we need to have some cumulative value and not just one token
         let Some(mut bytes_available) = tokens.recv().await else {
             break;
         };
@@ -65,7 +68,7 @@ where
                 .await?;
             if n_read == 0 {
                 debug!("Stream finished.");
-                break;
+                break 'outer;
             }
             debug!("Read chunk: {:?}", &data[..n_read]);
             sender.send(data[..n_read].to_vec())?;
@@ -85,8 +88,8 @@ async fn proxy(incoming: Incoming, sender: Sender, config: TokenBucketConfig) ->
     loop {
         let stream = connection.accept_uni().await;
         let stream = match stream {
-            Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
-                info!("connection closed");
+            Err(quinn::ConnectionError::ApplicationClosed(e)) => {
+                info!("connection closed: {e:?}");
                 return Ok(());
             }
             Err(e) => {
@@ -95,6 +98,7 @@ async fn proxy(incoming: Incoming, sender: Sender, config: TokenBucketConfig) ->
             Ok(s) => s,
         };
 
+        debug!("Got stream");
         let (listener_token_sender, listener_token_receiver) = mpsc::channel(bucket_capacity);
 
         tokio::try_join!(
@@ -104,12 +108,33 @@ async fn proxy(incoming: Incoming, sender: Sender, config: TokenBucketConfig) ->
     }
 }
 
-pub async fn listen(endpoint: Endpoint, sender: Sender, config: TokenBucketConfig) -> Result<()> {
+pub async fn listen(
+    endpoint: Endpoint,
+    sender: Sender,
+    cancel: CancellationToken,
+    config: TokenBucketConfig,
+) -> Result<()> {
     info!("listening on {}", endpoint.local_addr()?);
 
-    while let Some(incoming) = endpoint.accept().await {
-        info!("accepting connection");
-        tokio::spawn(proxy(incoming, sender.clone(), config));
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("Shutting down.");
+                break;
+            },
+            Some(incoming) = endpoint.accept() => {
+                if sender.is_closed() {
+                    error!("Sender is unexpectedly closed.");
+                    break;
+                }
+                info!("accepting connection");
+                tokio::spawn(proxy(incoming, sender.clone(), config));
+            },
+            else => {
+                error!("Endpoint is unexpectedly closed.");
+                break;
+            }
+        }
     }
     Ok(())
 }
@@ -174,10 +199,16 @@ mod tests {
         let (server_config, server_cert) = configure_server();
         let server_endpoint = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap())?;
         let listen_addr = server_endpoint.local_addr().unwrap();
+        let cancel = CancellationToken::new();
         tokio::spawn(async move {
-            listen(server_endpoint, sender, TokenBucketConfig::default())
-                .await
-                .unwrap();
+            listen(
+                server_endpoint,
+                sender,
+                cancel,
+                TokenBucketConfig::default(),
+            )
+            .await
+            .unwrap();
         });
 
         // Wait for the server to start

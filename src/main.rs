@@ -8,6 +8,7 @@ use {
         server::{listen, TokenBucketConfig},
     },
     tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver},
+    tokio_util::sync::CancellationToken,
 };
 
 async fn consume_data(mut receiver: UnboundedReceiver<Vec<u8>>) -> Result<()> {
@@ -42,9 +43,15 @@ async fn main() -> Result<()> {
     let (server_config, _) = configure_server();
     let (sender, receiver) = unbounded_channel();
 
+    let cancel = CancellationToken::new(); // we don't really need to cancel ever
     let server_endpoint = Endpoint::server(server_config, args.listen_address)?;
     tokio::try_join!(
-        listen(server_endpoint, sender, TokenBucketConfig::default()),
+        listen(
+            server_endpoint,
+            sender,
+            cancel,
+            TokenBucketConfig::default()
+        ),
         consume_data(receiver)
     )?;
     Ok(())
