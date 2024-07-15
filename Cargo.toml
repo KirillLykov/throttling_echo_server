@@ -1,0 +1,13 @@
+[package]
+name = "throttling_proxy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version =  "1.38", features = ["full"]}
+quinn = {version = "0.11"}
+rustls = { version = "0.23.5", default-features = false, features = ["ring", "std"] }
+clap ={ version = "4.5", features = ["derive", "cargo"]}
+anyhow = "1.0"
+rcgen = "0.13"
+
