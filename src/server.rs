@@ -56,8 +56,6 @@ where
     const BUF_SIZE: usize = 4 * 1024;
     let mut data = vec![0u8; BUF_SIZE];
     'outer: loop {
-        // TODO not sure that this is correct way of doing things
-        // because we need to have some cumulative value and not just one token
         let Some(mut bytes_available) = tokens.recv().await else {
             break;
         };
@@ -70,8 +68,8 @@ where
                 debug!("Stream finished.");
                 break 'outer;
             }
-            debug!("Read chunk: {:?}", &data[..n_read]);
-            sender.send(data[..n_read].to_vec())?;
+            debug!("Read bytes: {n_read}");
+            let _ = sender.send(data[..n_read].to_vec())?;
             bytes_available -= n_read;
         }
     }
