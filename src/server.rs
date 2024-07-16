@@ -46,7 +46,7 @@ async fn produce_tokens(
 
 async fn transfer<RecvType>(
     mut from: RecvType,
-    mut tokens: mpsc::Receiver<usize>,
+    tokens: &mut mpsc::Receiver<usize>,
     sender: Sender,
 ) -> Result<()>
 where
@@ -87,17 +87,23 @@ async fn proxy(
         bytes_per_token,
         token_interval,
     } = config;
+    let (listener_token_sender, mut listener_token_receiver) = mpsc::channel(bucket_capacity);
+    let h = tokio::spawn(produce_tokens(
+        bytes_per_token,
+        token_interval,
+        listener_token_sender,
+    ));
     let connection = incoming.await?;
     loop {
         if cancel.is_cancelled() {
             info!("stopping connection handling due to signal received.");
-            return Ok(());
+            break;
         }
         let stream = connection.accept_uni().await;
         let stream = match stream {
             Err(quinn::ConnectionError::ApplicationClosed(e)) => {
                 info!("connection closed: {e:?}");
-                return Ok(());
+                break;
             }
             Err(e) => {
                 return Err(e.into());
@@ -106,13 +112,12 @@ async fn proxy(
         };
 
         debug!("Got stream");
-        let (listener_token_sender, listener_token_receiver) = mpsc::channel(bucket_capacity);
 
-        tokio::try_join!(
-            produce_tokens(bytes_per_token, token_interval, listener_token_sender),
-            transfer(stream, listener_token_receiver, sender.clone()),
-        )?;
+        transfer(stream, &mut listener_token_receiver, sender.clone()).await?;
     }
+    drop(listener_token_receiver);
+    let _ = h.await?;
+    Ok(())
 }
 
 pub async fn listen(
@@ -181,14 +186,14 @@ mod tests {
     #[tokio::test]
     async fn test_transfer() {
         let (mut send_stream, recv_stream) = tokio::io::duplex(64);
-        let (token_sender, token_receiver) = mpsc::channel(10);
+        let (token_sender, mut token_receiver) = mpsc::channel(10);
         let (unbounded_sender, mut unbounded_receiver) = mpsc::unbounded_channel();
 
         let data = b"hello world";
         send_stream.write_all(data).await.unwrap();
 
         tokio::spawn(async move {
-            transfer(recv_stream, token_receiver, unbounded_sender)
+            transfer(recv_stream, &mut token_receiver, unbounded_sender)
                 .await
                 .unwrap();
         });
