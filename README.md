@@ -14,10 +14,3 @@ The algorithm is the following:
     3.2 else packet is non-conformant
 
 There are 2 different strategies to handle non-conformant packets: drop them or delay (so-called traffic shaping).
-
-## Observations
-
-Here, I'm trying to delay them.
-But I don't observe that these delays are communicated to the sender.
-I would expect that sending streams takes longer if processing them on the server side takes longer.
-Yet according to the experiments in the `tests` folder, it is not the case.

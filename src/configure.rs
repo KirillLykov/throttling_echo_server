@@ -19,14 +19,13 @@ pub fn configure_client(node_cert: CertificateDer<'static>) -> quinn::ClientConf
 }
 
 /// Builds listener configuration along with its certificate.
-pub fn configure_server() -> (quinn::ServerConfig, CertificateDer<'static>) {
+pub fn configure_server(recv_window_size: u32) -> (quinn::ServerConfig, CertificateDer<'static>) {
     let (our_cert, our_priv_key) = gen_cert();
     let mut our_cfg =
         quinn::ServerConfig::with_single_cert(vec![our_cert.clone()], our_priv_key.into()).unwrap();
 
     let transport_config = Arc::get_mut(&mut our_cfg.transport).unwrap();
-    // No effect
-    //.datagram_receive_buffer_size(Some(32));
+    transport_config.receive_window(recv_window_size.into());
     transport_config.max_idle_timeout(Some(Duration::from_secs(20).try_into().unwrap()));
 
     (our_cfg, our_cert)

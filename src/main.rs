@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
 
     let args = Cli::parse();
 
-    let (server_config, _) = configure_server();
+    let (server_config, _) = configure_server(1500 * 100);
     let (sender, receiver) = unbounded_channel();
 
     let cancel = CancellationToken::new(); // we don't really need to cancel ever

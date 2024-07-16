@@ -24,7 +24,9 @@ async fn measure_tps(config: TokenBucketConfig) -> Result<(f64, f64), Box<dyn st
 
     let cancel = CancellationToken::new();
 
-    let (mut server_config, server_cert) = configure_server();
+    // limit the size of the recv window, otherwise we need to saturate it to see the effect.
+    let recv_window_size = DATA.len() as u32 * 16;
+    let (mut server_config, server_cert) = configure_server(recv_window_size);
     // I don't see any effect of this:
     server_config.incoming_buffer_size(1);
     let server_endpoint = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap())?;
@@ -89,7 +91,7 @@ static INIT: Once = Once::new();
 fn init_tracing() {
     INIT.call_once(|| {
         tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::new("info"))
+            .with_env_filter(EnvFilter::new("debug"))
             .init();
     });
 }

@@ -208,7 +208,7 @@ mod tests {
     async fn test_listen() -> Result<()> {
         let (sender, mut receiver) = mpsc::unbounded_channel();
 
-        let (server_config, server_cert) = configure_server();
+        let (server_config, server_cert) = configure_server(1500);
         let server_endpoint = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap())?;
         let listen_addr = server_endpoint.local_addr().unwrap();
         let cancel = CancellationToken::new();
