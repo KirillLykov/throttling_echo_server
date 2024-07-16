@@ -76,7 +76,12 @@ where
     Ok(())
 }
 
-async fn proxy(incoming: Incoming, sender: Sender, config: TokenBucketConfig) -> Result<()> {
+async fn proxy(
+    incoming: Incoming,
+    sender: Sender,
+    cancel: CancellationToken,
+    config: TokenBucketConfig,
+) -> Result<()> {
     let TokenBucketConfig {
         bucket_capacity,
         bytes_per_token,
@@ -84,6 +89,10 @@ async fn proxy(incoming: Incoming, sender: Sender, config: TokenBucketConfig) ->
     } = config;
     let connection = incoming.await?;
     loop {
+        if cancel.is_cancelled() {
+            info!("stopping connection handling due to signal received.");
+            return Ok(());
+        }
         let stream = connection.accept_uni().await;
         let stream = match stream {
             Err(quinn::ConnectionError::ApplicationClosed(e)) => {
@@ -126,7 +135,7 @@ pub async fn listen(
                     break;
                 }
                 info!("accepting connection");
-                tokio::spawn(proxy(incoming, sender.clone(), config));
+                tokio::spawn(proxy(incoming, sender.clone(), cancel.clone(), config));
             },
             else => {
                 error!("Endpoint is unexpectedly closed.");
