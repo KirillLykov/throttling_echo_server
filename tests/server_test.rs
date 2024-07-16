@@ -24,7 +24,9 @@ async fn measure_tps(config: TokenBucketConfig) -> Result<(f64, f64), Box<dyn st
 
     let cancel = CancellationToken::new();
 
-    let (server_config, server_cert) = configure_server();
+    let (mut server_config, server_cert) = configure_server();
+    // I don't see any effect of this:
+    server_config.incoming_buffer_size(1);
     let server_endpoint = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap())?;
     let listen_addr = server_endpoint.local_addr().unwrap();
     let server_handle = {
@@ -47,10 +49,10 @@ async fn measure_tps(config: TokenBucketConfig) -> Result<(f64, f64), Box<dyn st
         .expect("failed to connect");
 
     let cancel_timer = tokio::spawn(async move {
-        sleep(Duration::from_secs(10)).await;
+        sleep(Duration::from_secs(50)).await;
         cancel.cancel();
     });
-    let expected_num_txs = 10;
+    let expected_num_txs = 100;
     let start_time = tokio::time::Instant::now();
     for _ in 0..expected_num_txs {
         // Open a unidirectional stream and send data
@@ -63,11 +65,12 @@ async fn measure_tps(config: TokenBucketConfig) -> Result<(f64, f64), Box<dyn st
     info!("Elapsed sending: {elapsed_sending}");
 
     let start_time = tokio::time::Instant::now();
+    let mut elapsed_recv = 0f64;
     let mut total_data_bytes = 0;
     while let Some(received_data) = receiver.recv().await {
         total_data_bytes += received_data.len();
+        elapsed_recv = start_time.elapsed().as_secs_f64();
     }
-    let elapsed_recv: f64 = start_time.elapsed().as_secs_f64();
     info!("Elapsed receiving: {elapsed_recv}");
 
     assert_eq!(expected_num_txs * DATA.len(), total_data_bytes);
@@ -86,18 +89,18 @@ static INIT: Once = Once::new();
 fn init_tracing() {
     INIT.call_once(|| {
         tracing_subscriber::fmt()
-            .with_env_filter(EnvFilter::new("debug"))
+            .with_env_filter(EnvFilter::new("info"))
             .init();
     });
 }
 
 #[tokio::test]
 async fn test_tps_with_very_throttled_connection() {
-    //init_tracing();
+    init_tracing();
     // the data is 128b, so to receive the packet we need 400ms
     let config = TokenBucketConfig {
-        bucket_capacity: 64,
-        bytes_per_token: 32,
+        bucket_capacity: 128,
+        bytes_per_token: 64,
         token_interval: Duration::from_millis(100),
     };
     let (elapsed_send, elapsed_recv) = measure_tps(config.clone()).await.unwrap();

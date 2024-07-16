@@ -9,6 +9,8 @@ pub fn configure_client(node_cert: CertificateDer<'static>) -> quinn::ClientConf
     roots.add(node_cert).unwrap();
 
     let mut transport_config = quinn::TransportConfig::default();
+    // No effect:
+    // transport_config.datagram_send_buffer_size(8);
     transport_config.max_idle_timeout(Some(Duration::from_secs(20).try_into().unwrap()));
 
     let mut peer_cfg = quinn::ClientConfig::with_root_certificates(Arc::new(roots)).unwrap();
@@ -23,6 +25,8 @@ pub fn configure_server() -> (quinn::ServerConfig, CertificateDer<'static>) {
         quinn::ServerConfig::with_single_cert(vec![our_cert.clone()], our_priv_key.into()).unwrap();
 
     let transport_config = Arc::get_mut(&mut our_cfg.transport).unwrap();
+    // No effect
+    //.datagram_receive_buffer_size(Some(32));
     transport_config.max_idle_timeout(Some(Duration::from_secs(20).try_into().unwrap()));
 
     (our_cfg, our_cert)
